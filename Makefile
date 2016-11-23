@@ -67,9 +67,19 @@ creduce-prepare-%: csmith/%.c bin/lacc
 creduce-check: bin/lacc
 	./check.sh "bin/lacc -std=c99" creduce/reduce.c "$(CC) -std=c99"
 
+SQFLAGS := -DSQLITE_DEBUG -DSQLITE_MEMDEBUG
+
+dbm: bin/lacc
+	bin/lacc -c sqlite/shell.c -o shell.o
+	bin/lacc $(SQFLAGS) -c sqlite/sqlite3.c -o sqlite3.o
+	gcc $(SQFLAGS) shell.o sqlite3.o -o $@ -lm -lpthread -ldl
+
+dbm-cc:
+	gcc sqlite/shell.c sqlite/sqlite3.c -o $@ -lm -lpthread -ldl
+
 clean:
 	rm -rf bin
 	rm -f test/*.out test/*.txt test/*.s
 
 .PHONY: all test test-% install uninstall \
-	csmith-test creduce-prepare-% creduce-check clean
+	csmith-test creduce-prepare-% creduce-check clean dbm dbm-cc
