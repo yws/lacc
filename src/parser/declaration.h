@@ -5,7 +5,11 @@
 
 struct block *declaration(struct definition *def, struct block *parent);
 
-Type declarator(Type base, String *name);
+Type declarator(
+    struct definition *def,
+    struct block *parent,
+    Type base,
+    String *name);
 
 Type declaration_specifiers(int *storage_class, int *is_inline);
 

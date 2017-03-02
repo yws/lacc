@@ -117,13 +117,18 @@ struct expression {
  *
  * Handle va_start as a separate statement, as it requires knowledge
  * about memory layout only available to backend.
+ *
+ * Variable length arrays are allocated when declared, and deallocated
+ * all at once when exiting function scope. Expression holds the size
+ * in bytes to be allocated to VLA t.
  */
 struct statement {
     enum sttype {
-        IR_EXPR,     /* (expr)         */
-        IR_PARAM,    /* param (expr)   */
-        IR_VA_START, /* va_start(expr) */
-        IR_ASSIGN    /* t = expr       */
+        IR_EXPR,      /* (expr)              */
+        IR_PARAM,     /* param (expr)        */
+        IR_VA_START,  /* va_start(expr)      */
+        IR_ASSIGN,    /* t = expr            */
+        IR_VLA_ALLOC  /* vla_alloc t, (expr) */
     } st;
     unsigned long out;
     struct var t;
@@ -204,6 +209,19 @@ struct definition {
      * only concerns a single symbol.
      */
     const struct symbol *symbol;
+
+    /*
+     * Keep running track of size allocated for VLAs during each
+     * function, adding to this variables. As symbols are added, emit
+     * assignment to their corresponding vla offset variables to get
+     * the current value.
+     *
+     * The offset starts at zero for the first VLA. The second array
+     * that is added get offset equal to the size of the first array.
+     *
+     * If a function contains no VLAs, this symbol is NULL.
+     */
+    /*const struct symbol *vla_stack_offset;*/
 
     /*
      * Function definitions are associated with a control flow graph,

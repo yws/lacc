@@ -43,7 +43,10 @@ static Type get_type_placeholder(void)
  * though K&R require at least specifier: (void)
  * Set parameter-type-list = parameter-list, including the , ...
  */
-static Type parameter_list(Type base)
+static Type parameter_list(
+    struct definition *def,
+    struct block *block,
+    Type base)
 {
     String name;
     Type func, type;
@@ -53,7 +56,7 @@ static Type parameter_list(Type base)
     while (peek().token != ')') {
         name.len = 0;
         type = declaration_specifiers(NULL, NULL);
-        type = declarator(type, &name);
+        type = declarator(def, block, type, &name);
         if (is_void(type)) {
             if (nmembers(func)) {
                 error("Incomplete type in parameter list.");
@@ -114,39 +117,93 @@ static Type identifier_list(Type base)
 }
 
 /*
+ * Parse expression determining length of array.
+ *
+ * Variable length arrays must be ensured to evaluate to a new temporary
+ * only associated with this type, such that sizeof always returns the
+ * correct value.
+ */
+static struct var array_length_expression(
+    struct definition *def,
+    struct block *block)
+{
+    struct var val;
+    struct block *parent;
+
+    if (!def) {
+        val = constant_expression();
+    } else {
+        parent = block;
+        block = assignment_expression(def, block);
+        assert(parent == block); /* todo: Branching expressions. */
+        val = eval(def, block, block->expr);
+    }
+
+    if (val.kind == IMMEDIATE
+        && (!is_integer(val.type)
+            || (is_signed(val.type) && val.imm.i < 1)
+            || (is_unsigned(val.type) && val.imm.u < 1)))
+    {
+        error("Array dimension must be a natural number.");
+        exit(1);
+    }
+
+    if (!is_unsigned(val.type)) {
+        val = eval(def, block,
+            eval_expr(def, block, IR_OP_CAST, val, basic_type__unsigned_long));
+    } else if (val.kind == DIRECT && !is_temporary(val.symbol)) {
+        val = eval_copy(def, block, val);
+    }
+
+    return val;
+}
+
+/*
  * Parse array declarations of the form [s0][s1]..[sn], resulting in
  * type [s0] [s1] .. [sn] (base).
  *
  * Only the first dimension s0 can be unspecified, yielding an
  * incomplete type. Incomplete types are represented by having size of
  * zero.
+ *
+ * VLA require evaluating an expression, and storing it in a separate
+ * stack allocated variable.
  */
-static Type direct_declarator_array(Type base)
+static Type direct_declarator_array(
+    struct definition *def,
+    struct block *block,
+    Type base)
 {
     size_t length;
     struct var val;
+    const struct symbol *sym;
 
     if (peek().token == '[') {
         next();
+        length = 0;
+        sym = NULL;
         if (peek().token != ']') {
-            val = constant_expression();
-            assert(val.kind == IMMEDIATE);
-            if (!is_integer(val.type)
-                || (is_signed(val.type) && val.imm.i < 1)) {
-                error("Array dimension must be a natural number.");
-                exit(1);
+            val = array_length_expression(def, block);
+            assert(type_equal(val.type, basic_type__unsigned_long));
+            if (val.kind == IMMEDIATE) {
+                length = val.imm.u;
+            } else {
+                assert(val.kind == DIRECT);
+                assert(val.symbol);
+                sym = val.symbol;
             }
-            length = is_signed(val.type) ? (size_t) val.imm.i : val.imm.u;
-        } else {
-            length = 0;
         }
         consume(']');
-        base = direct_declarator_array(base);
-        if (!size_of(base)) {
+        base = direct_declarator_array(def, block, base);
+        if (!size_of(base) && !is_vla(base)) {
             error("Array has incomplete element type.");
             exit(1);
         }
-        base = type_create(T_ARRAY, base, length);
+
+        if (is_vla(base)) {
+            
+        }
+        base = type_create(T_ARRAY, base, length, sym);
     }
 
     return base;
@@ -163,7 +220,11 @@ static Type direct_declarator_array(Type base)
  * making it `* (int) -> void`. Void is used as a sentinel, the inner
  * declarator can only produce pointer, function or array.
  */
-static Type direct_declarator(Type base, String *name)
+static Type direct_declarator(
+    struct definition *def,
+    struct block *block,
+    Type base,
+    String *name)
 {
     struct token t;
     Type type, head = basic_type__void;
@@ -179,7 +240,7 @@ static Type direct_declarator(Type base, String *name)
         break;
     case '(':
         next();
-        head = declarator(head, name);
+        head = declarator(def, block, head, name);
         consume(')');
         break;
     default:
@@ -188,7 +249,7 @@ static Type direct_declarator(Type base, String *name)
 
     switch (peek().token) {
     case '[':
-        type = direct_declarator_array(base);
+        type = direct_declarator_array(def, block, base);
         break;
     case '(':
         next();
@@ -198,7 +259,7 @@ static Type direct_declarator(Type base, String *name)
         if (t.token == IDENTIFIER && !get_typedef(t.d.string)) {
             type = identifier_list(base);
         } else {
-            type = parameter_list(base);
+            type = parameter_list(def, block, base);
         }
         pop_scope(&ns_ident);
         pop_scope(&ns_tag);
@@ -234,13 +295,17 @@ static Type pointer(Type type)
     }
 }
 
-Type declarator(Type base, String *name)
+Type declarator(
+    struct definition *def,
+    struct block *block,
+    Type base,
+    String *name)
 {
     while (peek().token == '*') {
         base = pointer(base);
     }
 
-    return direct_declarator(base, name);
+    return direct_declarator(def, block, base, name);
 }
 
 static void member_declaration_list(Type type)
@@ -253,7 +318,7 @@ static void member_declaration_list(Type type)
         decl_base = declaration_specifiers(NULL, NULL);
         do {
             name.len = 0;
-            decl_type = declarator(decl_base, &name);
+            decl_type = declarator(NULL, NULL, decl_base, &name);
             if (is_struct_or_union(type) && peek().token == ':') {
                 if (!is_int(decl_type)) {
                     error("Unsupported type '%t' for bit-field.", decl_type);
@@ -579,8 +644,8 @@ static void zero_initialize(
     case T_UNION:
         assert(size);
         target.type = (size % 8)
-            ? type_create(T_ARRAY, basic_type__char, size)
-            : type_create(T_ARRAY, basic_type__long, size / 8);
+            ? type_create(T_ARRAY, basic_type__char, size, NULL)
+            : type_create(T_ARRAY, basic_type__long, size / 8, NULL);
     case T_ARRAY:
         var = target;
         target.type = type_next(target.type);
@@ -985,7 +1050,7 @@ static void define_builtin__func__(String name)
      * Just add the symbol directly as a special string value. No
      * explicit assignment reflected in the IR.
      */
-    type = type_create(T_ARRAY, basic_type__char, (size_t) name.len + 1);
+    type = type_create(T_ARRAY, basic_type__char, (size_t) name.len + 1, NULL);
     sym = sym_add(
         &ns_ident,
         str_init("__func__"),
@@ -1004,7 +1069,10 @@ static void define_builtin__func__(String name)
  * Default to int for parameters that are given without type in the
  * function signature.
  */
-static void parameter_declaration_list(struct definition *def, Type type)
+static void parameter_declaration_list(
+    struct definition *def,
+    struct block *block,
+    Type type)
 {
     int i;
     struct member *param;
@@ -1012,7 +1080,7 @@ static void parameter_declaration_list(struct definition *def, Type type)
     assert(is_function(type));
     assert(current_scope_depth(&ns_ident) == 1);
     while (peek().token != '{') {
-        declaration(def, NULL);
+        declaration(def, block);
     }
 
     for (i = 0; i < nmembers(type); ++i) {
@@ -1042,7 +1110,27 @@ static void parameter_declaration_list(struct definition *def, Type type)
     }
 }
 
-/* Parse declaration with optional initializer. */
+static struct block *declare_vla(
+    struct definition *def,
+    struct block *block,
+    struct symbol *sym)
+{
+    struct symbol *addr;
+
+    assert(is_vla(sym->type));
+    addr = sym_create_temporary(type_create(T_POINTER, type_next(sym->type)));
+    array_push_back(&def->locals, addr);
+    sym->vla_address = addr;
+    eval_vla_alloc(def, block, sym);
+    return block;
+}
+
+/*
+ * Parse declaration, possibly with initializer.
+ *
+ * Cover external declarations, functions, and local declarations
+ * (with optional initialization code) inside functions.
+ */
 struct block *init_declarator(
     struct definition *def,
     struct block *parent,
@@ -1057,7 +1145,7 @@ struct block *init_declarator(
     const struct member *param;
 
     *is_func = 0;
-    type = declarator(base, &name);
+    type = declarator(def, parent, base, &name);
     if (!name.len) {
         return parent;
     }
@@ -1077,6 +1165,7 @@ struct block *init_declarator(
     switch (current_scope_depth(&ns_ident)) {
     case 0: break;
     case 1: /* Parameters from old-style function definitions. */
+        assert(def->symbol);
         param = find_type_member(def->symbol->type, name);
         if (is_array(type)) {
             sym->type = type_create(T_POINTER, type_next(type));
@@ -1092,6 +1181,9 @@ struct block *init_declarator(
         if (symtype == SYM_DEFINITION) {
             assert(linkage == LINK_NONE);
             array_push_back(&def->locals, sym);
+            if (is_vla(type)) {
+                parent = declare_vla(def, parent, sym);
+            }
         }
         break;
     }
@@ -1107,15 +1199,16 @@ struct block *init_declarator(
             error("Symbol '%s' was already defined.", str_raw(sym->name));
             exit(1);
         }
+        if (is_vla(sym->type)) {
+            error("Variable length array cannot be initialized.");
+            exit(1);
+        }
         consume('=');
         sym->symtype = SYM_DEFINITION;
         if (sym->linkage == LINK_NONE) {
-            assert(def);
-            assert(parent);
             parent = initializer(def, parent, var_direct(sym));
         } else {
-            assert(sym->depth || !parent);
-            def = cfg_init(sym);
+            define_symbol(def, sym);
             initializer(def, def->body, var_direct(sym));
         }
         assert(size_of(sym->type) > 0);
@@ -1125,14 +1218,13 @@ struct block *init_declarator(
     case FIRST(type_qualifier):
     case REGISTER:
     case '{':
-        assert(!parent);
         assert(sym->linkage != LINK_NONE);
         if (is_function(sym->type)) {
             sym->symtype = SYM_DEFINITION;
-            def = cfg_init(sym);
+            define_symbol(def, sym);
             push_scope(&ns_label);
             push_scope(&ns_ident);
-            parameter_declaration_list(def, type);
+            parameter_declaration_list(def, parent, type);
             if (context.standard >= STD_C99) {
                 define_builtin__func__(sym->name);
             }
@@ -1140,8 +1232,10 @@ struct block *init_declarator(
             pop_scope(&ns_label);
             pop_scope(&ns_ident);
             *is_func = 1;
+            break;
         }
     default:
+        /*type_clean_function_prototype(sym->type);*/
         break;
     }
 
@@ -1159,6 +1253,8 @@ struct block *declaration(struct definition *def, struct block *parent)
     Type base;
     enum symtype symtype;
     enum linkage linkage;
+    struct definition *decl;
+    struct block *block;
     int storage_class, is_inline, is_func;
 
     base = declaration_specifiers(&storage_class, &is_inline);
@@ -1187,10 +1283,23 @@ struct block *declaration(struct definition *def, struct block *parent)
     }
 
     while (1) {
-        parent = init_declarator(def, parent, base, symtype, linkage, &is_func);
+        if (linkage == LINK_INTERN || linkage == LINK_EXTERN) {
+            decl = get_prototype_definition();
+            block = decl->body;
+            block =
+                init_declarator(decl, block, base, symtype, linkage, &is_func);
+            if (!decl->symbol) {
+                release_prototype_definition(decl);
+            }
+        } else {
+            parent =
+                init_declarator(def, parent, base, symtype, linkage, &is_func);
+        }
+
         if (is_func) {
             return parent;
         }
+
         if (peek().token == ',') {
             next();
         } else break;

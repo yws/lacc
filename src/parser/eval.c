@@ -279,6 +279,7 @@ static void emit_ir(struct block *block, enum sttype st, ...)
         stmt.t = var_void();
         switch (st) {
         case IR_ASSIGN:
+        case IR_VLA_ALLOC:
             stmt.t = va_arg(args, struct var);
         case IR_EXPR:
         case IR_PARAM:
@@ -554,11 +555,25 @@ static struct expression add(
             expr = create_expr(IR_OP_ADD, l, r);
         }
     } else if (is_pointer(l.type) && is_integer(r.type)) {
-        size = size_of(type_deref(l.type));
+        type = type_deref(l.type);
+        if (is_vla(type)) {
+            expr = eval_vla_size(def, block, type);
+            r = eval_cast(def, block, r, basic_type__long);
+            expr = eval_expr(def, block, IR_OP_MUL, eval(def, block, expr), r);
+            r = eval(def, block, expr);
+            type = l.type;
+            l.type = basic_type__long;
+            expr = create_expr(IR_OP_ADD, l, r);
+            expr.type = type;
+            return expr;
+        }
+
+        size = size_of(type);
         if (!size) {
             error("Pointer arithmetic on incomplete type.");
             exit(1);
         }
+
         /*
          * Special case for immediate string literal + constant, and
          * ADDRESS + constant. These can be evaluated immediately. If r
@@ -1041,7 +1056,16 @@ static struct var rvalue(
     if (is_function(var.type)) {
         var = eval_addr(def, block, var);
     } else if (is_array(var.type)) {
-        if (var.kind == IMMEDIATE) {
+        if (is_vla(var.type) && var.symbol->vla_address) {
+            if (var.kind == DIRECT) {
+                var = var_direct(var.symbol->vla_address);
+            } else {
+                assert(var.kind == DEREF);
+                assert(!var.offset);
+                var.kind = DIRECT;
+                var.type = type_create(T_POINTER, type_next(var.type));
+            }
+        } else if (var.kind == IMMEDIATE) {
             assert(var.symbol);
             assert(var.symbol->symtype == SYM_STRING_VALUE);
             /*
@@ -1154,6 +1178,13 @@ struct var eval_addr(
     if (is_field(var)) {
         error("Cannot take address of bit-field.");
         exit(1);
+    }
+
+    if (is_vla(var.type) && var.symbol->vla_address) {
+        assert(var.kind == DIRECT);
+        assert(var.symbol);
+        var = var_direct(var.symbol->vla_address);
+        return var;
     }
 
     switch (var.kind) {
@@ -1641,6 +1672,49 @@ static struct block *eval_logical_expression(
     f->jump[0] = r;
     r->expr = as_expr(res);
     return r;
+}
+
+void eval_vla_alloc(
+    struct definition *def,
+    struct block *block,
+    const struct symbol *sym)
+{
+    assert(is_vla(sym->type));
+    block->expr = eval_vla_size(def, block, sym->type);
+    emit_ir(block, IR_VLA_ALLOC, var_direct(sym), block->expr);
+}
+
+struct expression eval_vla_size(
+    struct definition *def,
+    struct block *block,
+    Type type)
+{
+    const struct symbol *len;
+    struct expression expr;
+    struct var size;
+    Type base;
+
+    assert(is_vla(type));
+    len = type_vla_length(type);
+    base = type_next(type);
+    if (len) {
+        if (is_vla(base)) {
+            size = eval(def, block, eval_vla_size(def, block, base));
+            expr = eval_expr(def, block, IR_OP_MUL, var_direct(len), size);
+        } else if (size_of(base) > 1) {
+            size = imm_unsigned(basic_type__unsigned_long, size_of(base));
+            expr = eval_expr(def, block, IR_OP_MUL, var_direct(len), size);
+        } else {
+            assert(size_of(base) == 1);
+            expr = as_expr(var_direct(len));
+        }
+    } else {
+        size = imm_unsigned(basic_type__unsigned_long, type_array_len(type));
+        expr = eval_vla_size(def, block, base);
+        expr = eval_expr(def, block, IR_OP_MUL, size, eval(def, block, expr));
+    }
+
+    return expr;
 }
 
 static int is_logical_immediate(
