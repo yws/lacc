@@ -1236,8 +1236,8 @@ struct block *init_declarator(
         break;
     }
 
-    if (is_function(sym->type)) {
-        /*type_clean_prototype(sym->type);*/
+    if (is_function(sym->type) && sym->symtype != SYM_DEFINITION) {
+        type_clean_prototype(sym->type);
     }
 
     return parent;
