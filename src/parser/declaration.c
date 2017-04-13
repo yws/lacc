@@ -1235,8 +1235,11 @@ struct block *init_declarator(
             break;
         }
     default:
-        /*type_clean_function_prototype(sym->type);*/
         break;
+    }
+
+    if (!*is_func && is_function(sym->type)) {
+        /*type_clean_prototype(sym->type);*/
     }
 
     return parent;

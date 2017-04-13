@@ -89,10 +89,10 @@ Type type_patch_declarator(Type head, Type target);
  * function parameters or VLA length constraints that will be invalid
  * beyond prototype scope.
  *
- * For example, a declaration like int foo(int n, int a[][n]) is
+ * For example, a declaration like int foo(int n, int a[][n]) will be
  * converted to int foo(int n, int a[][*]).
  */
-void type_clean_function_prototype(Type type);
+void type_clean_prototype(Type type);
 
 /* Specify name for tagged struct or union type. */
 void type_set_tag(Type type, String tag);

@@ -104,7 +104,6 @@ extern const Type
  *     int  c : 7;    // offset = 4, field_width = 7, field_offset = 5
  * }
  *
- *
  * Symbol is used for function parameters, pointing to the actual
  * instances registered in the definition.
  */

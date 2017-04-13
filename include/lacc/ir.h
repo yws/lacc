@@ -211,19 +211,6 @@ struct definition {
     const struct symbol *symbol;
 
     /*
-     * Keep running track of size allocated for VLAs during each
-     * function, adding to this variables. As symbols are added, emit
-     * assignment to their corresponding vla offset variables to get
-     * the current value.
-     *
-     * The offset starts at zero for the first VLA. The second array
-     * that is added get offset equal to the size of the first array.
-     *
-     * If a function contains no VLAs, this symbol is NULL.
-     */
-    /*const struct symbol *vla_stack_offset;*/
-
-    /*
      * Function definitions are associated with a control flow graph,
      * where this is the entry point. Static and extern definitions are
      * represented as a series of assignment IR operations.

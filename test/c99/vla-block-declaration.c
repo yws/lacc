@@ -20,5 +20,5 @@ int foo(int n, int a[][n]) {
 }
 
 int main(void) {
-	return bar(42);
+	return bar(16);
 }

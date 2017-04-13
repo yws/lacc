@@ -388,7 +388,7 @@ Type type_patch_declarator(Type head, Type target)
     return next;
 }
 
-static void type_clean_prototype(Type type)
+void type_clean_prototype(Type type)
 {
     int i;
     struct member *m;
@@ -407,6 +407,9 @@ static void type_clean_prototype(Type type)
         break;
     case T_STRUCT:
     case T_UNION:
+        t = get_typetree_handle(type.ref);
+        if (t->tag.len)
+            break;
     case T_FUNCTION:
         for (i = 0; i < nmembers(type); ++i) {
             m = get_member(type, i);
@@ -414,13 +417,6 @@ static void type_clean_prototype(Type type)
             type_clean_prototype(m->type);
         }
         break;
-    }
-}
-
-void type_clean_function_prototype(Type type)
-{
-    if (is_function(type)) {
-        type_clean_prototype(type);
     }
 }
 
