@@ -1126,7 +1126,8 @@ static struct block *declare_vla(
 }
 
 /*
- * Parse declaration, possibly with initializer.
+ * Parse declaration, possibly with initializer. New symbols are added
+ * to the symbol table.
  *
  * Cover external declarations, functions, and local declarations
  * (with optional initialization code) inside functions.
@@ -1136,15 +1137,13 @@ struct block *init_declarator(
     struct block *parent,
     Type base,
     enum symtype symtype,
-    enum linkage linkage,
-    int *is_func)
+    enum linkage linkage)
 {
     Type type;
     String name = {0};
     struct symbol *sym;
     const struct member *param;
 
-    *is_func = 0;
     type = declarator(def, parent, base, &name);
     if (!name.len) {
         return parent;
@@ -1231,14 +1230,13 @@ struct block *init_declarator(
             parent = block(def, def->body);
             pop_scope(&ns_label);
             pop_scope(&ns_ident);
-            *is_func = 1;
-            break;
+            return parent;
         }
     default:
         break;
     }
 
-    if (!*is_func && is_function(sym->type)) {
+    if (is_function(sym->type)) {
         /*type_clean_prototype(sym->type);*/
     }
 
@@ -1246,10 +1244,15 @@ struct block *init_declarator(
 }
 
 /*
- * Parse a declaration, adding new symbols to the symbol table.
+ * Parse a declaration list, beginning with a base set of specifiers,
+ * followed by a list of declarators.
  *
- * Cover external declarations, functions, and local declarations
- * (with optional initialization code) inside functions.
+ * Each new global declaration is assigned a clean 'struct definition'
+ * object, which might get filled with initialization code, or the body
+ * of a function.
+ *
+ * Terminate on hitting a function definition, otherwise read until the
+ * end of statement.
  */
 struct block *declaration(struct definition *def, struct block *parent)
 {
@@ -1258,7 +1261,7 @@ struct block *declaration(struct definition *def, struct block *parent)
     enum linkage linkage;
     struct definition *decl;
     struct block *block;
-    int storage_class, is_inline, is_func;
+    int storage_class, is_inline;
 
     base = declaration_specifiers(&storage_class, &is_inline);
     switch (storage_class) {
@@ -1289,18 +1292,14 @@ struct block *declaration(struct definition *def, struct block *parent)
         if (linkage == LINK_INTERN || linkage == LINK_EXTERN) {
             decl = get_prototype_definition();
             block = decl->body;
-            block =
-                init_declarator(decl, block, base, symtype, linkage, &is_func);
+            block = init_declarator(decl, block, base, symtype, linkage);
             if (!decl->symbol) {
                 release_prototype_definition(decl);
+            } else if (is_function(decl->symbol->type)) {
+                return parent;
             }
         } else {
-            parent =
-                init_declarator(def, parent, base, symtype, linkage, &is_func);
-        }
-
-        if (is_func) {
-            return parent;
+            parent = init_declarator(def, parent, base, symtype, linkage);
         }
 
         if (peek().token == ',') {
