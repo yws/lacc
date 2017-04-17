@@ -39,52 +39,71 @@ static Type get_type_placeholder(void)
 }
 
 /*
+ * Parse a function parameter list, adding symbols to scope.
+ *
  * FOLLOW(parameter-list) = { ')' }, peek to return empty list; even
  * though K&R require at least specifier: (void)
  * Set parameter-type-list = parameter-list, including the , ...
+ *
+ * As a special case, ignore evaluation when in block scope. This is to
+ * avoid VLA code that would be generated in cases like this:
+ *
+ *     int main(void) {
+ *         int foo(int n, int arr[][n + 1]);
+ *         return 0;
+ *     }
+ *
+ * The evaluation of n + 1 is done in a throwaway block, and not
+ * included in the CFG of main.
  */
-static Type parameter_list(
+static struct block *parameter_list(
     struct definition *def,
-    struct block *block,
-    Type base)
+    struct block *parent,
+    Type base,
+    Type *func)
 {
     String name;
-    Type func, type;
     struct symbol *sym;
+    struct block *block;
 
-    func = type_create(T_FUNCTION, base);
+    *func = type_create(T_FUNCTION, base);
+    block = current_scope_depth(&ns_ident) == 1
+        ? parent
+        : cfg_block_init(def);
+
     while (peek().token != ')') {
         name.len = 0;
-        type = declaration_specifiers(NULL, NULL);
-        type = declarator(def, block, type, &name);
-        if (is_void(type)) {
-            if (nmembers(func)) {
+        base = declaration_specifiers(NULL, NULL);
+        block = declarator(def, block, base, &base, &name);
+        if (is_void(base)) {
+            if (nmembers(*func)) {
                 error("Incomplete type in parameter list.");
+                exit(1);
             }
             break;
         }
-        if (is_array(type)) {
-            type = type_create(T_POINTER, type_next(type));
+        if (is_array(base)) {
+            base = type_create(T_POINTER, type_next(base));
         }
         sym = NULL;
         if (name.len) {
-            sym = sym_add(&ns_ident, name, type, SYM_DEFINITION, LINK_NONE);
+            sym = sym_add(&ns_ident, name, base, SYM_DEFINITION, LINK_NONE);
         }
-        type_add_member(func, name, type, sym);
+        type_add_member(*func, name, base, sym);
         if (peek().token != ',') {
             break;
         }
         consume(',');
         if (peek().token == DOTS) {
             consume(DOTS);
-            assert(!is_vararg(func));
-            type_add_member(func, str_init("..."), basic_type__void, NULL);
-            assert(is_vararg(func));
+            assert(!is_vararg(*func));
+            type_add_member(*func, str_init("..."), basic_type__void, NULL);
+            assert(is_vararg(*func));
             break;
         }
     }
 
-    return func;
+    return current_scope_depth(&ns_ident) == 1 ? block : parent;
 }
 
 /*
@@ -123,19 +142,18 @@ static Type identifier_list(Type base)
  * only associated with this type, such that sizeof always returns the
  * correct value.
  */
-static struct var array_length_expression(
+static struct block *array_declarator_length(
     struct definition *def,
     struct block *block)
 {
     struct var val;
-    struct block *parent;
 
-    if (!def) {
+    if (!def) { /* This is perhaps never the case now ? */
         val = constant_expression();
+        assert(!block);
+        block = cfg_block_init(def);
     } else {
-        parent = block;
         block = assignment_expression(def, block);
-        assert(parent == block); /* todo: Branching expressions. */
         val = eval(def, block, block->expr);
     }
 
@@ -155,7 +173,8 @@ static struct var array_length_expression(
         val = eval_copy(def, block, val);
     }
 
-    return val;
+    block->expr = as_expr(val);
+    return block;
 }
 
 /*
@@ -169,44 +188,42 @@ static struct var array_length_expression(
  * VLA require evaluating an expression, and storing it in a separate
  * stack allocated variable.
  */
-static Type direct_declarator_array(
+static struct block *array_declarator(
     struct definition *def,
     struct block *block,
-    Type base)
+    Type base,
+    Type *type)
 {
-    size_t length;
     struct var val;
-    const struct symbol *sym;
+    size_t length = 0;
+    const struct symbol *sym = NULL;
 
-    if (peek().token == '[') {
-        next();
-        length = 0;
-        sym = NULL;
-        if (peek().token != ']') {
-            val = array_length_expression(def, block);
-            assert(type_equal(val.type, basic_type__unsigned_long));
-            if (val.kind == IMMEDIATE) {
-                length = val.imm.u;
-            } else {
-                assert(val.kind == DIRECT);
-                assert(val.symbol);
-                sym = val.symbol;
-            }
+    consume('[');
+    if (peek().token != ']') {
+        block = array_declarator_length(def, block);
+        val = eval(def, block, block->expr);
+        assert(type_equal(val.type, basic_type__unsigned_long));
+        if (val.kind == IMMEDIATE) {
+            length = val.imm.u;
+        } else {
+            assert(val.kind == DIRECT);
+            assert(val.symbol);
+            sym = val.symbol;
         }
-        consume(']');
-        base = direct_declarator_array(def, block, base);
-        if (!size_of(base) && !is_vla(base)) {
-            error("Array has incomplete element type.");
-            exit(1);
-        }
-
-        if (is_vla(base)) {
-            
-        }
-        base = type_create(T_ARRAY, base, length, sym);
     }
 
-    return base;
+    consume(']');
+    if (peek().token == '[') {
+        block = array_declarator(def, block, base, &base);
+    }
+
+    if (!size_of(base) && !is_vla(base)) {
+        error("Array has incomplete element type.");
+        exit(1);
+    }
+
+    *type = type_create(T_ARRAY, base, length, sym);
+    return block;
 }
 
 /*
@@ -220,18 +237,19 @@ static Type direct_declarator_array(
  * making it `* (int) -> void`. Void is used as a sentinel, the inner
  * declarator can only produce pointer, function or array.
  */
-static Type direct_declarator(
+static struct block *direct_declarator(
     struct definition *def,
     struct block *block,
     Type base,
+    Type *type,
     String *name)
 {
     struct token t;
-    Type type, head = basic_type__void;
+    Type head = basic_type__void;
 
     switch (peek().token) {
     case IDENTIFIER:
-        t = consume(IDENTIFIER);
+        t = next();
         if (!name) {
             error("Unexpected identifier in abstract declarator.");
             exit(1);
@@ -240,7 +258,7 @@ static Type direct_declarator(
         break;
     case '(':
         next();
-        head = declarator(def, block, head, name);
+        block = declarator(def, block, head, &head, name);
         consume(')');
         break;
     default:
@@ -249,7 +267,7 @@ static Type direct_declarator(
 
     switch (peek().token) {
     case '[':
-        type = direct_declarator_array(def, block, base);
+        block = array_declarator(def, block, base, type);
         break;
     case '(':
         next();
@@ -257,24 +275,24 @@ static Type direct_declarator(
         push_scope(&ns_tag);
         push_scope(&ns_ident);
         if (t.token == IDENTIFIER && !get_typedef(t.d.string)) {
-            type = identifier_list(base);
+            *type = identifier_list(base);
         } else {
-            type = parameter_list(def, block, base);
+            block = parameter_list(def, block, base, type);
         }
         pop_scope(&ns_ident);
         pop_scope(&ns_tag);
         consume(')');
         break;
     default:
-        type = base;
+        *type = base;
         break;
     }
 
     if (!is_void(head)) {
-        type = type_patch_declarator(head, type);
+        *type = type_patch_declarator(head, *type);
     }
 
-    return type;
+    return block;
 }
 
 static Type pointer(Type type)
@@ -295,17 +313,19 @@ static Type pointer(Type type)
     }
 }
 
-Type declarator(
+struct block *declarator(
     struct definition *def,
     struct block *block,
     Type base,
+    Type *type,
     String *name)
 {
+    assert(type);
     while (peek().token == '*') {
         base = pointer(base);
     }
 
-    return direct_declarator(def, block, base, name);
+    return direct_declarator(def, block, base, type, name);
 }
 
 static void member_declaration_list(Type type)
@@ -318,7 +338,7 @@ static void member_declaration_list(Type type)
         decl_base = declaration_specifiers(NULL, NULL);
         do {
             name.len = 0;
-            decl_type = declarator(NULL, NULL, decl_base, &name);
+            declarator(NULL, NULL, decl_base, &decl_type, &name);
             if (is_struct_or_union(type) && peek().token == ':') {
                 if (!is_int(decl_type)) {
                     error("Unsupported type '%t' for bit-field.", decl_type);
@@ -1069,7 +1089,7 @@ static void define_builtin__func__(String name)
  * Default to int for parameters that are given without type in the
  * function signature.
  */
-static void parameter_declaration_list(
+static struct block *parameter_declaration_list(
     struct definition *def,
     struct block *block,
     Type type)
@@ -1080,7 +1100,7 @@ static void parameter_declaration_list(
     assert(is_function(type));
     assert(current_scope_depth(&ns_ident) == 1);
     while (peek().token != '{') {
-        declaration(def, block);
+        block = declaration(def, block);
     }
 
     for (i = 0; i < nmembers(type); ++i) {
@@ -1108,6 +1128,8 @@ static void parameter_declaration_list(
         }
         array_push_back(&def->params, param->sym);
     }
+
+    return block;
 }
 
 static struct block *declare_vla(
@@ -1144,7 +1166,7 @@ struct block *init_declarator(
     struct symbol *sym;
     const struct member *param;
 
-    type = declarator(def, parent, base, &name);
+    parent = declarator(def, parent, base, &type, &name);
     if (!name.len) {
         return parent;
     }
@@ -1223,11 +1245,11 @@ struct block *init_declarator(
             define_symbol(def, sym);
             push_scope(&ns_label);
             push_scope(&ns_ident);
-            parameter_declaration_list(def, parent, type);
+            parent = parameter_declaration_list(def, parent, type);
             if (context.standard >= STD_C99) {
                 define_builtin__func__(sym->name);
             }
-            parent = block(def, def->body);
+            parent = block(def, parent);
             pop_scope(&ns_label);
             pop_scope(&ns_ident);
             return parent;

@@ -5,10 +5,17 @@
 
 struct block *declaration(struct definition *def, struct block *parent);
 
-Type declarator(
+/*
+ * Parse a declarator. Set name = NULL for abstract declarator, only
+ * expecting a type.
+ *
+ * Declarators can produce evaluation through VLA types.
+ */
+struct block *declarator(
     struct definition *def,
     struct block *parent,
     Type base,
+    Type *type,
     String *name);
 
 Type declaration_specifiers(int *storage_class, int *is_inline);
