@@ -148,10 +148,9 @@ static struct block *array_declarator_length(
 {
     struct var val;
 
-    if (!def) { /* This is perhaps never the case now ? */
+    if (!def) {
         val = constant_expression();
-        assert(!block);
-        block = cfg_block_init(def);
+        block = cfg_block_init(NULL);
     } else {
         block = assignment_expression(def, block);
         val = eval(def, block, block->expr);
